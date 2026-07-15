@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>互动玉石珠帘（音效手机适配版）</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0b1d12; /* 典雅深绿底色 */
+            touch-action: none; /* 阻止移动端拉动页面 */
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .tip {
+            position: absolute;
+            bottom: 30px;
+            width: 100%;
+            text-align: center;
+            color: rgba(240, 230, 180, 0.4);
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 13px;
+            pointer-events: none;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="curtainCanvas"></canvas>
+    <div class="tip">触摸屏幕以激活并拨动空灵珠帘</div>
+
+    <script>
+        const canvas = document.getElementById('curtainCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // 音频系统初始化管理（Web Audio API 实时合成）
+        let audioCtx = null;
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        // 极简风铃/玉石撞击声波形合成算法
+        function playChime(pitchModifier = 1.0) {
+            if (!audioCtx) return;
+            initAudio();
+
+            const now = audioCtx.currentTime;
+            
+            // 基础清脆频率（1200Hz - 2200Hz 高频，模拟玉石碰撞）
+            const baseFreq = (1500 + Math.random() * 800) * pitchModifier;
+
+            // 1. 主振荡器（模拟撞击声）
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            // 2. 泛音振荡器（提供空灵的金属/玉石共振感）
+            const overtone = audioCtx.createOscillator();
+            const overtoneGain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(baseFreq, now);
+            
+            overtone.type = 'triangle';
+            overtone.frequency.setValueAtTime(baseFreq * 1.5, now);
+
+            // 音量包络线：极快渐入（瞬间撞击），指数级衰减
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.12, now + 0.005);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8); // 0.8秒后余音散尽
+
+            overtoneGain.gain.setValueAtTime(0, now);
+            overtoneGain.gain.linearRampToValueAtTime(0.04, now + 0.005);
+            overtoneGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+
+            // 声音链路连接
+            osc.connect(gain);
+            overtone.connect(overtoneGain);
+            
+            gain.connect(audioCtx.destination);
+            overtoneGain.connect(audioCtx.destination);
+
+            // 启动并定时销毁
+            osc.start(now);
+            osc.stop(now + 0.8);
+            overtone.start(now);
+            overtone.stop(now + 0.5);
+        }
+
+        // 适配高分屏，防止锯齿及定位飘移
+        let dpr = window.devicePixelRatio || 1;
+        let width, height;
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            width = rect.width;
+            height = rect.height;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            ctx.scale(dpr, dpr);
+            initCurtain();
+        }
+
+        // 珠帘物理参数
+        const stringsCount = 36;      // 横向数量翻倍
+        const nodesPerString = 44;    // 纵向数量翻倍，总粒子数达到 4 倍高密度
+        const restLength = 9;         // 垂直间距减半，保持紧密无缝隙
+        const gravity = 0.08;         // 降低重力，高密度下流动更轻盈
+        const friction = 0.98;        // 微调摩擦阻力，呈现丝绸般的自然波动感
+        const repelRadius = 55;       // 缩小交互半径，保证高密度下指尖划过有精致的波纹感
+
+        const textBank = "一帘幽梦深闺静数点寒星伴月明风拨玉指玲珑响雨打芭蕉细碎声";
+        let strings = [];
+        let mouse = { x: -1000, y: -1000, active: false };
+
+        // 记录每一根弦最后一次弹奏音效的时间，防止高频重复触发导致噪音
+        let lastChimeTime = Array(stringsCount).fill(0);
+
+        class Node {
+            constructor(x, y, char, isPinned = false) {
+                this.x = x;
+                this.y = y;
+                this.px = x;
+                this.py = y;
+                this.char = char;
+                this.isPinned = isPinned;
+            }
+
+            update(stringIndex) {
+                if (this.isPinned) return;
+
+                // Verlet 运动计算
+                let vx = (this.x - this.px) * friction;
+                let vy = (this.y - this.py) * friction + gravity;
+
+                this.px = this.x;
+                this.py = this.y;
+
+                this.x += vx;
+                this.y += vy;
+
+                // 触摸排斥与交互
+                if (mouse.active) {
+                    let dx = this.x - mouse.x;
+                    let dy = this.y - mouse.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < repelRadius && dist > 0) {
+                        let force = (repelRadius - dist) / repelRadius;
+                        this.x += (dx / dist) * force * 10;
+                        this.y += (dy / dist) * force * 10;
+
+                        // 触发音效条件：手指大幅度拂过弦，且距离上一次发声超过 120 毫秒
+                        let now = Date.now();
+                        if (Math.abs(this.x - this.px) > 2.5 && now - lastChimeTime[stringIndex] > 120) {
+                            // 越往底下的珠子声音音调越高
+                            let pitch = 1.0 + (this.y / height) * 0.5; 
+                            playChime(pitch);
+                            lastChimeTime[stringIndex] = now;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 初始化
+        function initCurtain() {
+            strings = [];
+            const sidePadding = 45; // 手机两边留空 45px，方便手指拨动
+            const spacing = (width - sidePadding * 2) / (stringsCount - 1);
+
+            for (let i = 0; i < stringsCount; i++) {
+                let x = sidePadding + spacing * i;
+                let startY = 60; 
+                let nodes = [];
+
+                for (let j = 0; j < nodesPerString; j++) {
+                    let y = startY + j * restLength;
+                    let char = textBank[Math.floor(Math.random() * textBank.length)];
+                    nodes.push(new Node(x, y, char, j === 0));
+                }
+                strings.push(nodes);
+            }
+        }
+
+        // 物理距离拉伸约束
+        function solveConstraints() {
+            for (let k = 0; k < 5; k++) {
+                for (let s = 0; s < strings.length; s++) {
+                    let nodes = strings[s];
+                    for (let i = 0; i < nodes.length - 1; i++) {
+                        let n1 = nodes[i];
+                        let n2 = nodes[i+1];
+
+                        let dx = n2.x - n1.x;
+                        let dy = n2.y - n1.y;
+                        let dist = Math.sqrt(dx * dx + dy * dy);
+                        let diff = restLength - dist;
+                        let percent = (diff / dist) * 0.5;
+
+                        let offsetX = dx * percent;
+                        let offsetY = dy * percent;
+
+                        if (!n1.isPinned) {
+                            n1.x -= offsetX;
+                            n1.y -= offsetY;
+                        }
+                        n2.x += offsetX;
+                        n2.y += offsetY;
+                    }
+                }
+            }
+        }
+
+        // 主循环绘制
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+
+            for (let s = 0; s < strings.length; s++) {
+                let nodes = strings[s];
+                for (let i = 0; i < nodes.length; i++) {
+                    let node = nodes[i];
+                    node.update(s);
+
+                    // 渐变透明度
+                    let alpha = 1 - (i / nodesPerString) * 0.5;
+                    
+                    // 根据列数生成不同的漂亮渐变色块
+                    let hue = (s * (360 / stringsCount)) % 360;
+                    ctx.fillStyle = `hsla(${hue}, 70%, 60%, ${alpha})`;
+
+                    // 绘制紧密相连的色块（无缝隙）
+                    // 宽度设定为与列间距一致，高度设定为与节点物理间距一致
+                    let blockWidth = (width - 90) / (stringsCount - 1) + 1;
+                    let blockHeight = restLength + 1; 
+
+                    ctx.fillRect(node.x - blockWidth / 2, node.y - blockHeight / 2, blockWidth, blockHeight);
+                }
+            }
+
+            solveConstraints();
+            requestAnimationFrame(draw);
+        }
+
+        // 核心修正：完美映射触控在 Canvas 逻辑像素上的真实坐标，解决偏移问题
+        function updateMouseCoords(e) {
+            e.preventDefault(); // 极关键：阻止移动端滚动和缩放等默认行为
+            initAudio(); // 每次触摸激活/恢复音轨上下文
+
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            // 完美坐标公式：消除手机 DPR、CSS 缩放、视口偏移产生的偏差
+            mouse.x = (clientX - rect.left) * (width / rect.width);
+            mouse.y = (clientY - rect.top) * (height / rect.height);
+            mouse.active = true;
+        }
+
+        function endTouch() {
+            mouse.active = false;
+        }
+
+        // 绑定各类鼠标/触摸事件
+        canvas.addEventListener('mousedown', (e) => { initAudio(); updateMouseCoords(e); });
+        canvas.addEventListener('mousemove', updateMouseCoords);
+        canvas.addEventListener('mouseup', endTouch);
+
+        canvas.addEventListener('touchstart', (e) => { initAudio(); updateMouseCoords(e); }, { passive: false });
+        canvas.addEventListener('touchmove', updateMouseCoords, { passive: false });
+        canvas.addEventListener('touchend', endTouch);
+
+        window.addEventListener('resize', resize);
+
+        // 启动
+        resize();
+        draw();
+    </script>
+</body>
+</html>
